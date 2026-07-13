@@ -1,0 +1,20 @@
+[project]
+name = "audio_quickstart"
+version = "0.1.0"
+description = "Minimal reference: audio -> OpenAI transcription -> CrewAI deployment kickoff -> answer"
+authors = [{ name = "CrewAI Field Engineering" }]
+requires-python = ">=3.10,<3.14"
+dependencies = [
+    "crewai[tools]>=1.14.0,<2.0.0"
+]
+
+[project.scripts]
+audio_quickstart = "audio_quickstart.main:run"
+run_crew = "audio_quickstart.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.crewai]
+type = "crew"

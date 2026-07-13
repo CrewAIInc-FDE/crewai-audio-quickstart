@@ -1,0 +1,8 @@
+answer_task:
+  description: >
+    Answer the following question, which was transcribed from a voice
+    recording: "{query}"
+  expected_output: >
+    A direct, conversational answer of at most three sentences, suitable
+    for being read back out loud.
+  agent: assistant
