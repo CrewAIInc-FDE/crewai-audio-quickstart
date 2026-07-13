@@ -1,16 +1,26 @@
 #!/usr/bin/env python
-"""Local entry point: `crewai run` (or `uv run run_crew`) executes this."""
-import sys
+"""Entry points. Local smoke run: two data turns + a form turn, one session."""
 
-from audio_quickstart.crew import AudioQuickstart
+import uuid
+
+from audio_quickstart.flow import AssistantFlow
 
 
-def run():
-    """Run the crew locally with a sample (or CLI-provided) question."""
-    query = " ".join(sys.argv[1:]) or "What are three interesting facts about the Moon?"
-    result = AudioQuickstart().crew().kickoff(inputs={"query": query})
-    print(result.raw)
+def kickoff() -> None:
+    sid = str(uuid.uuid4())
+    print(f"--- session {sid} ---")
+    for message in (
+        "What assets do you have?",
+        "What was the latest output on pump A1?",
+        "I'd like to file a maintenance report.",
+    ):
+        print(f"\nYOU: {message}")
+        print("ASSISTANT:", AssistantFlow().kickoff(inputs={"id": sid, "message": message}))
+
+
+def plot() -> None:
+    AssistantFlow().plot()
 
 
 if __name__ == "__main__":
-    run()
+    kickoff()

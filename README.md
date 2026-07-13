@@ -1,157 +1,113 @@
 # crewai-audio-quickstart
 
-Minimal reference: **audio → OpenAI transcription → CrewAI deployment kickoff → answer.**
+**A voice-ready, conversational field assistant on CrewAI AMP — the full reference
+pattern:** audio → transcription → a deployed Flow with intent routing, tool-using
+agents, and session memory that survives across kickoffs → answer (text you can
+speak back).
 
-Speak a question into an audio file, and a crew deployed on [CrewAI AMP](https://app.crewai.com)
-answers it. The crew here is deliberately tiny (one agent that answers a question) —
-the point of this repo is the **wiring**, which works the same for any crew or flow
-that takes text input.
+The flow mirrors an architecture running in real field deployments, with every
+customer-specific piece swapped for a generic, self-contained stand-in (the data
+layer is a seeded SQLite file — no external services, no credentials).
 
 ## Architecture
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as Audio file<br/>(mic recording, wav/mp3/m4a)
-    participant C as client/ask.py<br/>(runs on your machine)
-    participant O as OpenAI<br/>Transcription API
-    participant A as CrewAI AMP<br/>deployment
-
-    U->>C: samples/question.wav
-    C->>O: POST /v1/audio/transcriptions<br/>(uses your local OPENAI_API_KEY)
-    O-->>C: "What are three interesting facts about the moon?"
-    C->>A: GET /inputs (Bearer deployment token)
-    A-->>C: ["query"]  ← the deployment's real input contract
-    C->>A: POST /kickoff {"inputs": {"query": "..."}}
-    A-->>C: kickoff_id
-    loop until terminal state
-        C->>A: GET /status/{kickoff_id}
-    end
-    A-->>C: answer
-    C-->>U: printed answer
+```
+audio file / mic ──► OpenAI transcription (client-side; the only OpenAI-key use)
+                          │  text
+                          ▼
+             POST {deployment}/kickoff  {"inputs": {"id": "<uuid>", "message": "..."}}
+                          │
+                          ▼
+        AssistantFlow  (one kickoff = one conversational turn)
+        ├─ deterministic-first router: quit / cancel / form-continuation
+        │  are handled with ZERO LLM calls; everything else gets one small
+        │  classification call (asset_data | start_form:<type> | unknown)
+        ├─ Asset-data agent — 3 tools over the SQLite readings table:
+        │    get_latest_reading · get_period_stats · list_assets
+        │    (fuzzy name matching → canonical names; "latest" skips the
+        │    in-progress day and says so when it can't)
+        ├─ Form agent — voice-guided wizard (maintenance / incident report):
+        │    one field per turn, typed validation, read-back, explicit
+        │    "confirm" before a (mock) submission
+        └─ @persist state keyed on `id`: history + form progress survive
+           across kickoff executions (on AMP SaaS, state lands on the
+           persistent volume by default)
 ```
 
-**Where credentials live (and don't):**
+**Session contract:** `{"id": "<uuid>", "message": "<user text>"}` → reply string.
+Reuse the same `id` to continue the conversation (the form wizard depends on this);
+new UUID = new conversation. `id` must be a full, valid UUID.
 
-| Step | Credential | Where it lives |
-|---|---|---|
-| Speech-to-text (client) | `OPENAI_API_KEY` | Your machine only — env var, `.env`, or `~/.openai-key`. Never committed. |
-| Crew's LLM calls (server) | `OPENAI_API_KEY` | Set once as an **environment variable on the AMP deployment** — stored on the platform, never in the repo. Orgs that want centralized key management can back deployment env vars with AMP's [Secrets Manager](https://docs.crewai.com/en/enterprise/features/secrets-manager/overview). |
-| Kickoff API | deployment URL + bearer token | Shown on the deployment's page in AMP. Each deployment has its own. |
+## Deploy (CrewAI AMP)
 
-Nothing secret ever lives in this repository — the deployment's key sits in AMP's
-env-var store, and the client's key stays on your machine.
+1. Connect this repo (Deploy From Code → Git Repository), branch `main`.
+   The repo auto-deploys on new commits once connected.
+2. The deployment needs an LLM: an **OpenAI LLM connection** in your org, or an
+   `OPENAI_API_KEY` environment variable on the deployment (the agents and the
+   intent classifier use `openai/gpt-4o`).
+3. No other configuration. No database env vars (SQLite is seeded on first use),
+   and no storage env vars (AMP persists flow state by default).
 
-## Repo layout
-
-```
-src/audio_quickstart/   the crew: one agent, one task, input {query}
-client/ask.py           audio → transcript → kickoff → answer (stdlib only)
-scripts/make_sample_audio.sh   synthesize a test question with macOS `say`
-samples/question.wav    a ready-made spoken question
-```
-
-## Prerequisites
-
-- A [CrewAI AMP](https://app.crewai.com) account.
-- An OpenAI API key — used in two places, both outside this repo: as an env var
-  on the AMP deployment (for the crew's LLM calls) and on your machine (for the
-  transcription call).
-- Python 3.10+ (the client is stdlib-only; no `pip install` needed to run it).
-- [uv](https://docs.astral.sh/uv/) and the [CrewAI CLI](https://docs.crewai.com/en/concepts/cli)
-  if you want to run or modify the crew locally.
-
-## 1. Deploy the crew to AMP
-
-Fork/clone this repo into your own GitHub account or org, then in
-[CrewAI AMP](https://app.crewai.com): **Deployments → Create Deployment**, pick this
-repository (root directory), add one environment variable — `OPENAI_API_KEY` — and
-deploy. The key is stored on the platform with the deployment; it never appears in
-the repo.
-
-Or from the terminal, with the CLI authenticated (`crewai login`) and the key in a
-local `.env` (the CLI reads it from there and registers it with the deployment):
+## Ask it something (audio in, answer out)
 
 ```bash
-crewai deploy create   # run inside the repo
-crewai deploy status   # wait for "Deploy Enqueued" → online
-```
-
-When it's online, the deployment's page shows its **URL** and **bearer token**.
-Copy both:
-
-```bash
-cp .env.example .env   # then fill in the values
-```
-
-## 2. Run the client end-to-end
-
-```bash
-# no assets needed — synthesize a spoken question (macOS):
-./scripts/make_sample_audio.sh "What are three interesting facts about the Moon?"
-
+cp .env.example .env         # fill in the two deployment values
 python3 client/ask.py samples/question.wav
 ```
 
-Expected output:
-
-```
-1) transcribing samples/question.wav with gpt-4o-transcribe ...
-   transcript: 'What are three interesting facts about the moon?'
-2) discovering the deployment's input contract (GET /inputs) ...
-   required inputs: ['query']
-3) kicking off with inputs: {"query": "What are three interesting facts about the moon?"}
-   kickoff_id: 01234567-89ab-cdef-0123-456789abcdef
-4) polling for the result ...
-   state: RUNNING
-   state: SUCCESS
-
-answer:
-The Moon is Earth's only natural satellite ...
-```
-
-Any wav/mp3/m4a recording works — record a voice memo and pass its path.
-
-## Run the crew locally (optional)
+`client/ask.py` is stdlib-only and does the whole loop: transcribe → discover the
+deployment's input contract (`GET /inputs` — never assume key names) → kickoff →
+poll → print. It keeps a `.session` file so consecutive questions continue ONE
+conversation — which is what makes the form wizard work by voice:
 
 ```bash
-export OPENAI_API_KEY=sk-...   # locally there's no platform connection, so a key IS needed
-uv run run_crew "Why is the sky blue?"
+python3 client/ask.py clips/file-a-report.wav      # "I'd like to file a maintenance report"
+python3 client/ask.py clips/asset-id.wav           # "Pump A1"
+python3 client/ask.py clips/work-done.wav          # ... one field per clip ...
+python3 client/ask.py --new-session clips/next.wav # fresh conversation
 ```
 
-## Troubleshooting the kickoff API
+Things to try:
+- "What assets do you have?"
+- "What was the latest output on pump A1?"
+- "Average energy use on compressor B1 this week?"
+- "I'd like to file an incident report." → then answer its questions → "confirm"
 
-The five foot-guns, in the order people usually hit them:
+Record clips with `scripts/make_sample_audio.sh`, your phone, or anything that
+produces wav/mp3/m4a.
 
-1. **Wrong base URL or token → 401/403.** Every deployment has its **own** URL and
-   its **own** bearer token — both from that deployment's page in AMP. A token from
-   another deployment (or an org/user token from somewhere else) will not work.
+## Browser client (`ui/`)
 
-2. **Assumed input key names → 422.** Never guess the inputs. Ask the deployment:
+A fully client-side web UI (Rust/Leptos → WASM): paste your deployment URL,
+bearer token, and OpenAI key (stored in your browser's localStorage, sent nowhere
+else), then talk — mic capture → transcription → kickoff → spoken reply via the
+browser's speech synthesis. See [`ui/README.md`](ui/README.md) for build/run.
 
-   ```bash
-   curl -H "Authorization: Bearer $CREWAI_DEPLOYMENT_TOKEN" "$CREWAI_DEPLOYMENT_URL/inputs"
-   # {"inputs": ["query"]}
-   ```
+> Browser calls go directly to the deployment API; if your browser blocks them
+> (CORS), use `client/ask.py` — same loop, no browser restrictions.
 
-   Send **exactly** those keys. A classic failure: sending `session_id` when the
-   flow expects `id` → 422. (`python3 client/ask.py --show-inputs` does the same.)
+## Local development
 
-3. **Forgot the `inputs` wrapper → 422.** The kickoff body is
-   `{"inputs": {"query": "..."}}`, not `{"query": "..."}`.
+```bash
+uv sync
+OPENAI_API_KEY=sk-... uv run kickoff     # scripted 3-turn smoke session
+```
 
-4. **Truncated UUID → 422.** If your crew/flow takes a session or run id, it must be
-   a **full, valid UUID** (`str(uuid.uuid4())`). Never shorten it for readability.
+The data layer (`src/audio_quickstart/data.py`) seeds deterministic synthetic
+readings for five assets × 45 days. Swap `connect()`/the tool internals for your
+warehouse or API to make this real — the agents, router, and session machinery
+don't change.
 
-5. **Polling too literally.** `/status/{kickoff_id}` moves through states like
-   `PENDING → RUNNING → SUCCESS` (exact names can vary by version). Treat any of
-   `SUCCESS/COMPLETED` as done and `FAILED/ERROR` as failed, rather than matching
-   one exact string — see `wait_for_answer()` in `client/ask.py`.
+## Layout
 
-## Adapting this to your own crew
-
-Point `CREWAI_DEPLOYMENT_URL`/`CREWAI_DEPLOYMENT_TOKEN` at any deployment. The
-client discovers the input contract at runtime, drops the transcript into the text
-input, and auto-fills any `*_id` inputs with fresh UUIDs. If your deployment's
-inputs are more elaborate, adjust `build_inputs()` in `client/ask.py` — everything
-else stays the same.
+```
+src/audio_quickstart/
+├── flow.py      # AssistantFlow: router + handlers + @persist session state
+├── agents.py    # data agent + form agent (one LLM instance per agent)
+├── tools.py     # 3 data tools (SQLite) + 3 form tools; caching disabled
+├── forms.py     # form schemas, typed validation, session state machine
+├── data.py      # synthetic SQLite readings (the stubbed "warehouse")
+└── main.py      # local smoke entry point
+client/ask.py    # stdlib audio client (transcribe → kickoff → poll)
+ui/              # Leptos (Rust/WASM) browser client
+```

@@ -156,15 +156,34 @@ def discover_inputs(base: str, token: str) -> list[str]:
     return data.get("inputs", data) if isinstance(data, dict) else data
 
 
-def build_inputs(required: list[str], transcript: str) -> dict:
-    """Map the transcript (plus auto-filled ids) onto the required keys."""
+SESSION_FILE = ".session"  # persists the conversation id between runs
+
+
+def current_session(new: bool = False) -> str:
+    """One conversation across runs: reuse the stored session id until
+    --new-session rotates it. (The deployed flow keys its memory on `id`.)"""
+    if not new and os.path.exists(SESSION_FILE):
+        sid = open(SESSION_FILE).read().strip()
+        try:
+            uuid.UUID(sid)
+            return sid
+        except ValueError:
+            pass
+    sid = str(uuid.uuid4())
+    with open(SESSION_FILE, "w") as fh:
+        fh.write(sid)
+    return sid
+
+
+def build_inputs(required: list[str], transcript: str, session_id: str) -> dict:
+    """Map the transcript (plus the session id) onto the required keys."""
     inputs: dict[str, str] = {}
     text_keys = [k for k in required if k in ("query", "question", "message", "text", "input")]
     id_keys = [k for k in required if k == "id" or k.endswith("_id")]
 
     for key in id_keys:
-        # Session/run ids must be full, valid UUIDs — generate one per run.
-        inputs[key] = str(uuid.uuid4())
+        # Session/run ids must be full, valid UUIDs.
+        inputs[key] = session_id
 
     if text_keys:
         inputs[text_keys[0]] = transcript
@@ -219,6 +238,8 @@ def main() -> None:
                          "whisper-1 also works)")
     ap.add_argument("--show-inputs", action="store_true",
                     help="Just print the deployment's required inputs and exit")
+    ap.add_argument("--new-session", action="store_true",
+                    help="Start a fresh conversation (rotates the stored session id)")
     args = ap.parse_args()
 
     base = os.environ.get("CREWAI_DEPLOYMENT_URL", "").rstrip("/")
@@ -249,7 +270,9 @@ def main() -> None:
     required = discover_inputs(base, token)
     print(f"   required inputs: {required}")
 
-    inputs = build_inputs(required, transcript)
+    session_id = current_session(new=args.new_session)
+    print(f"   session: {session_id} (reuse = conversation continues; --new-session to reset)")
+    inputs = build_inputs(required, transcript, session_id)
     print(f"3) kicking off with inputs: {json.dumps(inputs)}")
     kickoff_id = kickoff(base, token, inputs)
     print(f"   kickoff_id: {kickoff_id}")
