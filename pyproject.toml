@@ -5,7 +5,7 @@ description = "Minimal reference: audio -> OpenAI transcription -> CrewAI deploy
 authors = [{ name = "CrewAI Field Engineering" }]
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "crewai[tools]>=1.14.0,<2.0.0"
+    "crewai>=1.14.0,<2.0.0"
 ]
 
 [project.scripts]
