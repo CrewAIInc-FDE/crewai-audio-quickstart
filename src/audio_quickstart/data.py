@@ -61,7 +61,9 @@ def connect() -> sqlite3.Connection:
     """Open (and seed on first use) the synthetic readings database."""
     path = _db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    # check_same_thread=False: the agent executor invokes tools from worker
+    # threads; reads on a seeded local file are safe to share.
+    conn = sqlite3.connect(path, check_same_thread=False)
     cur = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='DAILY_ASSET_READINGS'"
     )
