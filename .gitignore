@@ -4,3 +4,5 @@ __pycache__/
 .venv/
 *.aiff
 .session
+ui/target/
+ui/dist/

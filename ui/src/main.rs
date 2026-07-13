@@ -1,0 +1,405 @@
+//! Field Assistant — all-client-side browser UI (Leptos CSR → WASM).
+//!
+//! Pattern: paste three values (deployment URL, deployment bearer token,
+//! OpenAI key), all persisted to localStorage and sent nowhere except to
+//! those two APIs, directly from the browser. Mic → OpenAI transcription →
+//! deployment kickoff (same session id per conversation) → poll → reply,
+//! optionally spoken via the browser's speech synthesis.
+
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use leptos::prelude::*;
+use leptos::task::spawn_local;
+use serde::{Deserialize, Serialize};
+use wasm_bindgen::closure::Closure;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
+
+const SETTINGS_KEY: &str = "audio_quickstart_settings";
+const OPENAI_TRANSCRIPTIONS: &str = "https://api.openai.com/v1/audio/transcriptions";
+
+#[derive(Clone, Default, Serialize, Deserialize, PartialEq)]
+struct Settings {
+    deployment_url: String,
+    deployment_token: String,
+    openai_key: String,
+    speak_replies: bool,
+}
+
+impl Settings {
+    fn ready(&self) -> bool {
+        !self.deployment_url.is_empty() && !self.deployment_token.is_empty()
+    }
+    fn load() -> Self {
+        storage()
+            .and_then(|s| s.get_item(SETTINGS_KEY).ok().flatten())
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    }
+    fn save(&self) {
+        if let (Some(s), Ok(raw)) = (storage(), serde_json::to_string(self)) {
+            let _ = s.set_item(SETTINGS_KEY, &raw);
+        }
+    }
+}
+
+fn storage() -> Option<web_sys::Storage> {
+    web_sys::window().and_then(|w| w.local_storage().ok().flatten())
+}
+
+#[derive(Clone, PartialEq)]
+struct Msg {
+    role: &'static str, // "user" | "assistant"
+    text: String,
+}
+
+// ---------------------------------------------------------------------------
+// Deployment API (kickoff → poll)
+// ---------------------------------------------------------------------------
+
+async fn kickoff(cfg: &Settings, session_id: &str, message: &str) -> Result<String, String> {
+    let url = format!("{}/kickoff", cfg.deployment_url.trim_end_matches('/'));
+    let body = serde_json::json!({ "inputs": { "id": session_id, "message": message } });
+    let resp = gloo_net::http::Request::post(&url)
+        .header("Authorization", &format!("Bearer {}", cfg.deployment_token))
+        .header("Content-Type", "application/json")
+        .body(body.to_string())
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| format!("kickoff request failed: {e} (if this is a CORS error, use client/ask.py)"))?;
+    if !resp.ok() {
+        return Err(format!("kickoff HTTP {}: {}", resp.status(),
+                           resp.text().await.unwrap_or_default()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    ["kickoff_id", "id", "execution_id"]
+        .iter()
+        .find_map(|k| v.get(*k).and_then(|x| x.as_str()).map(String::from))
+        .ok_or_else(|| format!("no kickoff id in response: {v}"))
+}
+
+async fn poll_result(cfg: &Settings, kickoff_id: &str) -> Result<String, String> {
+    let url = format!("{}/status/{}", cfg.deployment_url.trim_end_matches('/'), kickoff_id);
+    for _ in 0..100 {
+        let resp = gloo_net::http::Request::get(&url)
+            .header("Authorization", &format!("Bearer {}", cfg.deployment_token))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let state = v.get("state").or_else(|| v.get("status"))
+            .and_then(|s| s.as_str()).unwrap_or("").to_uppercase();
+        match state.as_str() {
+            "SUCCESS" | "SUCCEEDED" | "COMPLETED" | "COMPLETE" | "FINISHED" => {
+                return Ok(v.get("result").and_then(|r| r.as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| v.to_string()));
+            }
+            "FAILED" | "FAILURE" | "ERROR" | "CANCELLED" => {
+                return Err(format!("run ended in {state}: {v}"));
+            }
+            _ => gloo_timers::future::TimeoutFuture::new(2_500).await,
+        }
+    }
+    Err("timed out waiting for the run".into())
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI transcription (browser FormData multipart)
+// ---------------------------------------------------------------------------
+
+async fn transcribe(cfg: &Settings, audio: web_sys::Blob) -> Result<String, String> {
+    if cfg.openai_key.is_empty() {
+        return Err("Set the OpenAI key in Settings to use the mic.".into());
+    }
+    let form = web_sys::FormData::new().map_err(js_err)?;
+    form.append_with_str("model", "gpt-4o-transcribe").map_err(js_err)?;
+    form.append_with_blob_and_filename("file", &audio, "clip.webm").map_err(js_err)?;
+    let resp = gloo_net::http::Request::post(OPENAI_TRANSCRIPTIONS)
+        .header("Authorization", &format!("Bearer {}", cfg.openai_key))
+        .body(form)
+        .map_err(|e| e.to_string())?
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.ok() {
+        return Err(format!("transcription HTTP {}: {}", resp.status(),
+                           resp.text().await.unwrap_or_default()));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    v.get("text").and_then(|t| t.as_str()).map(|t| t.trim().to_string())
+        .ok_or_else(|| format!("no text in transcription response: {v}"))
+}
+
+fn js_err(e: JsValue) -> String {
+    format!("{e:?}")
+}
+
+fn speak(text: &str) {
+    if let Some(w) = web_sys::window() {
+        if let Ok(synth) = w.speech_synthesis() {
+            if let Ok(utt) = web_sys::SpeechSynthesisUtterance::new_with_text(text) {
+                synth.speak(&utt);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// App
+// ---------------------------------------------------------------------------
+
+#[component]
+fn App() -> impl IntoView {
+    let initial = Settings::load();
+    let configured = initial.ready();
+    let (settings, set_settings) = signal(initial);
+    let (msgs, set_msgs) = signal(Vec::<Msg>::new());
+    let (session_id, set_session_id) = signal(uuid::Uuid::new_v4().to_string());
+    let (busy, set_busy) = signal(false);
+    let (status, set_status) = signal(String::new());
+    let (recording, set_recording) = signal(false);
+    let (draft, set_draft) = signal(String::new());
+    let (show_settings, set_show_settings) = signal(!configured);
+
+    let recorder: Rc<RefCell<Option<web_sys::MediaRecorder>>> = Rc::new(RefCell::new(None));
+
+    // one user turn: send text → kickoff → poll → append reply (+ speak)
+    let send_text = move |text: String| {
+        if text.trim().is_empty() || busy.get_untracked() {
+            return;
+        }
+        let cfg = settings.get_untracked();
+        if !cfg.ready() {
+            set_status.set("Set the deployment URL + token in Settings first.".into());
+            set_show_settings.set(true);
+            return;
+        }
+        set_msgs.update(|m| m.push(Msg { role: "user", text: text.clone() }));
+        set_busy.set(true);
+        set_status.set("kicking off…".into());
+        let sid = session_id.get_untracked();
+        spawn_local(async move {
+            let outcome = match kickoff(&cfg, &sid, &text).await {
+                Ok(kid) => {
+                    set_status.set(format!("running ({kid})…"));
+                    poll_result(&cfg, &kid).await
+                }
+                Err(e) => Err(e),
+            };
+            match outcome {
+                Ok(reply) => {
+                    if cfg.speak_replies {
+                        speak(&reply);
+                    }
+                    set_msgs.update(|m| m.push(Msg { role: "assistant", text: reply }));
+                    set_status.set(String::new());
+                }
+                Err(e) => set_status.set(format!("error: {e}")),
+            }
+            set_busy.set(false);
+        });
+    };
+
+    // mic toggle: record → transcribe → send_text
+    let rec_handle = recorder.clone();
+    let toggle_mic = move |_| {
+        if recording.get_untracked() {
+            if let Some(r) = rec_handle.borrow_mut().take() {
+                let _ = r.stop(); // onstop handles the rest
+            }
+            set_recording.set(false);
+            return;
+        }
+        let cfg = settings.get_untracked();
+        if cfg.openai_key.is_empty() {
+            set_status.set("Mic needs the OpenAI key (Settings) — it does the transcription.".into());
+            set_show_settings.set(true);
+            return;
+        }
+        let rec_slot = rec_handle.clone();
+        set_status.set("requesting microphone…".into());
+        spawn_local(async move {
+            let Some(devices) = web_sys::window()
+                .map(|w| w.navigator())
+                .and_then(|n| n.media_devices().ok())
+            else {
+                set_status.set("no mediaDevices in this browser".into());
+                return;
+            };
+            let constraints = web_sys::MediaStreamConstraints::new();
+            constraints.set_audio(&JsValue::TRUE);
+            let stream_promise = match devices.get_user_media_with_constraints(&constraints) {
+                Ok(p) => p,
+                Err(e) => {
+                    set_status.set(format!("mic error: {e:?}"));
+                    return;
+                }
+            };
+            let stream: web_sys::MediaStream = match JsFuture::from(stream_promise).await {
+                Ok(s) => s.unchecked_into(),
+                Err(e) => {
+                    set_status.set(format!("mic denied: {e:?}"));
+                    return;
+                }
+            };
+            let rec = match web_sys::MediaRecorder::new_with_media_stream(&stream) {
+                Ok(r) => r,
+                Err(e) => {
+                    set_status.set(format!("recorder error: {e:?}"));
+                    return;
+                }
+            };
+
+            let chunks: Rc<RefCell<Vec<web_sys::Blob>>> = Rc::new(RefCell::new(Vec::new()));
+            let chunks_in = chunks.clone();
+            let on_data = Closure::<dyn FnMut(web_sys::BlobEvent)>::new(move |e: web_sys::BlobEvent| {
+                if let Some(b) = e.data() {
+                    chunks_in.borrow_mut().push(b);
+                }
+            });
+            rec.set_ondataavailable(Some(on_data.as_ref().unchecked_ref()));
+            on_data.forget();
+
+            let stream_stop = stream.clone();
+            let on_stop = Closure::<dyn FnMut()>::new(move || {
+                // release the mic indicator
+                for track in stream_stop.get_tracks().iter() {
+                    track.unchecked_into::<web_sys::MediaStreamTrack>().stop();
+                }
+                let parts = js_sys::Array::new();
+                for b in chunks.borrow().iter() {
+                    parts.push(b);
+                }
+                let opts = web_sys::BlobPropertyBag::new();
+                opts.set_type("audio/webm");
+                let Ok(blob) = web_sys::Blob::new_with_blob_sequence_and_options(&parts, &opts)
+                else {
+                    set_status.set("could not assemble the recording".into());
+                    return;
+                };
+                let cfg2 = settings.get_untracked();
+                set_status.set("transcribing…".into());
+                spawn_local(async move {
+                    match transcribe(&cfg2, blob).await {
+                        Ok(text) if !text.is_empty() => {
+                            set_status.set(String::new());
+                            send_text(text);
+                        }
+                        Ok(_) => set_status.set("heard nothing — try again".into()),
+                        Err(e) => set_status.set(format!("error: {e}")),
+                    }
+                });
+            });
+            rec.set_onstop(Some(on_stop.as_ref().unchecked_ref()));
+            on_stop.forget();
+
+            if rec.start().is_ok() {
+                *rec_slot.borrow_mut() = Some(rec);
+                set_recording.set(true);
+                set_status.set("recording — click Stop when done".into());
+            } else {
+                set_status.set("could not start recording".into());
+            }
+        });
+    };
+
+    let submit_draft = move |_| {
+        let text = draft.get_untracked();
+        set_draft.set(String::new());
+        send_text(text);
+    };
+
+    view! {
+        <main>
+            <h1>"Field Assistant — CrewAI audio quickstart"</h1>
+
+            <div class="card">
+                <details prop:open=move || show_settings.get()>
+                    <summary>"Settings (stored only in this browser's localStorage)"</summary>
+                    <label>"Deployment URL"</label>
+                    <input type="text" placeholder="https://your-deployment....crewai.com"
+                        prop:value=move || settings.get().deployment_url
+                        on:change=move |ev| {
+                            set_settings.update(|s| s.deployment_url = event_target_value(&ev));
+                            settings.get_untracked().save();
+                        } />
+                    <label>"Deployment bearer token"</label>
+                    <input type="password" placeholder="bearer token from the deployment page"
+                        prop:value=move || settings.get().deployment_token
+                        on:change=move |ev| {
+                            set_settings.update(|s| s.deployment_token = event_target_value(&ev));
+                            settings.get_untracked().save();
+                        } />
+                    <label>"OpenAI API key (only for mic transcription; leave empty for text-only)"</label>
+                    <input type="password" placeholder="sk-..."
+                        prop:value=move || settings.get().openai_key
+                        on:change=move |ev| {
+                            set_settings.update(|s| s.openai_key = event_target_value(&ev));
+                            settings.get_untracked().save();
+                        } />
+                    <label>
+                        <input type="checkbox"
+                            prop:checked=move || settings.get().speak_replies
+                            on:change=move |ev| {
+                                set_settings.update(|s| s.speak_replies = event_target_checked(&ev));
+                                settings.get_untracked().save();
+                            } />
+                        " speak replies aloud"
+                    </label>
+                </details>
+            </div>
+
+            <div class="card">
+                <div class="msgs">
+                    <For each=move || msgs.get().into_iter().enumerate()
+                         key=|(i, _)| *i
+                         children=move |(_, m)| {
+                             view! { <div class=format!("msg {}", m.role)>{m.text.clone()}</div> }
+                         } />
+                </div>
+                <p class="status">{move || status.get()}</p>
+                <div class="row">
+                    <input type="text" placeholder="type a message — or use the mic"
+                        prop:value=move || draft.get()
+                        on:input=move |ev| set_draft.set(event_target_value(&ev))
+                        on:keydown=move |ev| {
+                            if ev.key() == "Enter" {
+                                let text = draft.get_untracked();
+                                set_draft.set(String::new());
+                                send_text(text);
+                            }
+                        } />
+                    <button disabled=move || busy.get() on:click=submit_draft>"Send"</button>
+                    <button class=move || if recording.get() { "rec" } else { "" }
+                        disabled=move || busy.get()
+                        on:click=toggle_mic>
+                        {move || if recording.get() { "Stop" } else { "🎤 Talk" }}
+                    </button>
+                </div>
+                <p class="sess">
+                    "session: " {move || session_id.get()}
+                    <button class="ghost" on:click=move |_| {
+                        set_session_id.set(uuid::Uuid::new_v4().to_string());
+                        set_msgs.set(Vec::new());
+                        set_status.set("new conversation started".into());
+                    }>"new conversation"</button>
+                </p>
+            </div>
+        </main>
+    }
+}
+
+fn main() {
+    console_error_panic_hook_lite();
+    leptos::mount::mount_to_body(App);
+}
+
+/// Tiny inline panic hook (avoids a dependency): log panics to the console.
+fn console_error_panic_hook_lite() {
+    std::panic::set_hook(Box::new(|info| {
+        web_sys::console::error_1(&JsValue::from_str(&info.to_string()));
+    }));
+}
