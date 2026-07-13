@@ -18,7 +18,7 @@ sequenceDiagram
     participant A as CrewAI AMP<br/>deployment
 
     U->>C: samples/question.wav
-    C->>O: POST /v1/audio/transcriptions<br/>(needs OPENAI_API_KEY — the only place a key is needed)
+    C->>O: POST /v1/audio/transcriptions<br/>(uses your local OPENAI_API_KEY)
     O-->>C: "What are three interesting facts about the moon?"
     C->>A: GET /inputs (Bearer deployment token)
     A-->>C: ["query"]  ← the deployment's real input contract
@@ -36,8 +36,11 @@ sequenceDiagram
 | Step | Credential | Where it lives |
 |---|---|---|
 | Speech-to-text (client) | `OPENAI_API_KEY` | Your machine only — env var, `.env`, or `~/.openai-key`. Never committed. |
-| Crew's LLM calls (server) | none in this repo | The deployment uses your AMP **organization's OpenAI connection** — no `OPENAI_API_KEY` env var on the deployment, no key in the code. |
+| Crew's LLM calls (server) | `OPENAI_API_KEY` | Set once as an **environment variable on the AMP deployment** — stored on the platform, never in the repo. Orgs that want centralized key management can back deployment env vars with AMP's [Secrets Manager](https://docs.crewai.com/en/enterprise/features/secrets-manager/overview). |
 | Kickoff API | deployment URL + bearer token | Shown on the deployment's page in AMP. Each deployment has its own. |
+
+Nothing secret ever lives in this repository — the deployment's key sits in AMP's
+env-var store, and the client's key stays on your machine.
 
 ## Repo layout
 
@@ -50,10 +53,10 @@ samples/question.wav    a ready-made spoken question
 
 ## Prerequisites
 
-- A [CrewAI AMP](https://app.crewai.com) account whose **organization has an
-  OpenAI connection** configured (AMP → Settings → LLM Connections). This is what
-  lets the deployed crew call OpenAI models with no key of its own.
-- An OpenAI API key **on your machine** for the transcription call.
+- A [CrewAI AMP](https://app.crewai.com) account.
+- An OpenAI API key — used in two places, both outside this repo: as an env var
+  on the AMP deployment (for the crew's LLM calls) and on your machine (for the
+  transcription call).
 - Python 3.10+ (the client is stdlib-only; no `pip install` needed to run it).
 - [uv](https://docs.astral.sh/uv/) and the [CrewAI CLI](https://docs.crewai.com/en/concepts/cli)
   if you want to run or modify the crew locally.
@@ -62,10 +65,12 @@ samples/question.wav    a ready-made spoken question
 
 Fork/clone this repo into your own GitHub account or org, then in
 [CrewAI AMP](https://app.crewai.com): **Deployments → Create Deployment**, pick this
-repository (root directory), and deploy. Because your org has an OpenAI connection,
-you do **not** need to set an `OPENAI_API_KEY` environment variable on the deployment.
+repository (root directory), add one environment variable — `OPENAI_API_KEY` — and
+deploy. The key is stored on the platform with the deployment; it never appears in
+the repo.
 
-Or from the terminal, with the CLI authenticated (`crewai login`):
+Or from the terminal, with the CLI authenticated (`crewai login`) and the key in a
+local `.env` (the CLI reads it from there and registers it with the deployment):
 
 ```bash
 crewai deploy create   # run inside the repo
