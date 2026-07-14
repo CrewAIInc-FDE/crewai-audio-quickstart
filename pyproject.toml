@@ -18,3 +18,10 @@ build-backend = "hatchling.build"
 
 [tool.crewai]
 type = "flow"
+
+[tool.uv]
+# GHSA-xf7x-x43h-rpqh: json-repair < 0.60.1 has an unbounded-CPU DoS on
+# circular JSON Schema $refs. crewai 1.15.2 pins ~=0.25.2, so force the
+# patched line until crewai lifts its pin. API surface used by crewai
+# (repair_json / loads) is unchanged across this range.
+override-dependencies = ["json-repair>=0.60.1"]
