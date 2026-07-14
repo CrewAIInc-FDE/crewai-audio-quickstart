@@ -111,3 +111,18 @@ src/audio_quickstart/
 client/ask.py    # stdlib audio client (transcribe → kickoff → poll)
 ui/              # Leptos (Rust/WASM) browser client
 ```
+
+## Releasing the browser UI (GitHub Pages)
+
+The UI is published at https://crewaiinc-fde.github.io/crewai-audio-quickstart/ —
+built locally, no CI:
+
+```
+./scripts/release-ui.sh
+```
+
+The script trunk-builds `ui/` with the Pages subpath baked in and force-pushes
+the snapshot to the `gh-pages` branch, which Pages serves (Settings → Pages →
+Deploy from a branch → `gh-pages` / root). Everything runs client-side: users
+paste their own deployment URL, bearer token, and (for the mic) OpenAI key,
+stored only in the browser's localStorage.
