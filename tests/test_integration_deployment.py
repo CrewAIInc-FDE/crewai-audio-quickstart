@@ -14,6 +14,14 @@ from tests.conftest import run_turn
 pytestmark = pytest.mark.credentialed
 
 
+def test_asset_discovery_routes_to_data_agent(deployment):
+    """Regression (2026-07-13): asset-DISCOVERY questions used to fall into
+    the unknown-intent fallback because the classifier only covered readings;
+    list_assets was unreachable. The demo hand-off leads with this phrase."""
+    _, reply = run_turn(deployment, "List the assets I can ask about.")
+    assert "PUMP A1" in reply.upper().replace("-", " ")
+
+
 def test_single_turn_answers_from_data(deployment):
     _, reply = run_turn(deployment, "What is the latest output reading for PUMP A1?")
     up = reply.upper()

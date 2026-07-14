@@ -58,7 +58,9 @@ _CLASSIFIER_SYSTEM = f"""You are a routing agent for a field assistant. \
 Given a user utterance, respond with exactly one classification token.
 
 Respond with exactly one of:
-- asset_data_query        — user asks about asset readings, output, energy, runtime
+- asset_data_query        — anything about the assets or their data: readings, \
+output, energy, runtime — INCLUDING which assets exist, what can be asked \
+about, or an asset mentioned by name
 {_FORM_TOKENS}
 - quit                    — user says goodbye or wants to stop
 - unknown                 — anything else: off-topic, greetings, unclear requests
