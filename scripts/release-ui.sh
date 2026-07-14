@@ -33,6 +33,9 @@ cleanup() { git worktree remove --force "$TMP" 2>/dev/null || rm -rf "$TMP"; }
 trap cleanup EXIT
 
 git worktree add --detach "$TMP" >/dev/null
+# --orphan refuses if the branch already exists locally (e.g. from a prior
+# release) — drop the stale local ref first; the push below recreates it.
+git branch -D gh-pages >/dev/null 2>&1 || true
 git -C "$TMP" checkout --orphan gh-pages >/dev/null 2>&1
 git -C "$TMP" rm -rfq . 2>/dev/null || true
 cp -R ui/dist/. "$TMP/"
