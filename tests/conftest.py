@@ -75,15 +75,32 @@ def ui_url() -> str:
 
 
 @pytest.fixture(scope="session")
-def browser_type_launch_args(browser_type_launch_args: dict) -> dict:
-    """Firefox with a fake microphone, so mic-path tests run headless in CI."""
-    return {
-        **browser_type_launch_args,
-        "firefox_user_prefs": {
-            "media.navigator.streams.fake": True,
-            "media.navigator.permission.disabled": True,
-        },
-    }
+def browser_type_launch_args(browser_type_launch_args: dict, browser_name: str) -> dict:
+    """Fake microphone per engine, so mic-path tests run headless anywhere.
+
+    Firefox is the suite default (strictest MediaRecorder — ogg). Chromium
+    covers the Chrome path (webm/opus):
+        uv run pytest -m credentialed -o addopts="" --browser chromium
+    (`-o addopts=""` clears the default --browser firefox; passing both
+    browsers runs every test on each.)"""
+    if browser_name == "firefox":
+        return {
+            **browser_type_launch_args,
+            "firefox_user_prefs": {
+                "media.navigator.streams.fake": True,
+                "media.navigator.permission.disabled": True,
+            },
+        }
+    if browser_name == "chromium":
+        return {
+            **browser_type_launch_args,
+            "args": [
+                *browser_type_launch_args.get("args", []),
+                "--use-fake-device-for-media-stream",
+                "--use-fake-ui-for-media-stream",
+            ],
+        }
+    return browser_type_launch_args
 
 
 # -- tiny deployment client (stdlib only, mirrors client/ask.py) --------------

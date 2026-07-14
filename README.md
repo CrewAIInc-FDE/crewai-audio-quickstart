@@ -148,8 +148,16 @@ CREWAI_DEPLOYMENT_TOKEN=<bearer token from the deployment's AMP page>
 OPENAI_API_KEY=sk-...        # only for mic-related tests
 ```
 
-Without it the suite stops with these same instructions. Firefox is the
-default e2e browser deliberately — it has the strictest MediaRecorder
+Without it the suite stops with these same instructions. To run the e2e
+tier on the Chrome engine instead (mic negotiates webm/opus there vs.
+Firefox's ogg — both verified):
+
+```
+uv run playwright install chromium
+uv run pytest -m credentialed -o addopts="" --browser chromium
+```
+
+Firefox is the default e2e browser deliberately — it has the strictest MediaRecorder
 behavior (default container `audio/ogg`), so a green mic test there covers
 the rest. The mic pipeline runs against Firefox's fake microphone, so no
 audio hardware (or OpenAI spend) is needed.
