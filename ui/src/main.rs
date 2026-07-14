@@ -427,7 +427,7 @@ fn App() -> impl IntoView {
                     </button>
                 </div>
                 <p class="sess">
-                    "chain head: "
+                    {concat!("build v", env!("CARGO_PKG_VERSION"), " · chain head: ")}
                     {move || chain_head.get().unwrap_or_else(|| "(new conversation)".into())}
                     <button class="ghost" on:click=move |_| {
                         set_chain_head.set(None);

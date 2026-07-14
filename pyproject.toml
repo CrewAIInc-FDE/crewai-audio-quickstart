@@ -12,6 +12,25 @@ dependencies = [
 kickoff = "audio_quickstart.main:kickoff"
 plot = "audio_quickstart.main:plot"
 
+[dependency-groups]
+# Test stack — installed by `uv sync` (dev group is on by default).
+# Playwright also needs a one-time browser download: uv run playwright install firefox
+dev = [
+    "pytest>=8.0",
+    "playwright>=1.45",
+    "pytest-playwright>=0.5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Firefox by default: it has the strictest MediaRecorder behavior of the
+# majors (default container audio/ogg) — if the mic path works there, it
+# works everywhere we care about.
+addopts = "--browser firefox"
+markers = [
+    "credentialed: needs the git-ignored .env at the repo root (deployment URL/token; see tests/conftest.py) — run `uv run pytest -m \"not credentialed\"` to skip",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

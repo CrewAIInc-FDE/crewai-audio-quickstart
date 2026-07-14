@@ -24,8 +24,30 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 REPO_SLUG="$(basename -s .git "$(git remote get-url origin)")"
 
+# Every release bumps the UI patch version. The version is compiled into the
+# app (footer: "build vX.Y.Z"), and trunk content-hashes all assets, so a
+# fresh deploy is visibly and mechanically distinct from any cached one —
+# the only residual staleness is GitHub Pages' ~10-minute index.html TTL.
+NEW_VERSION=$(python3 - <<'PY'
+import pathlib, re
+path = pathlib.Path("ui/Cargo.toml")
+text = path.read_text()
+m = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"', text, re.M)
+major, minor, patch = map(int, m.groups())
+new = f"{major}.{minor}.{patch + 1}"
+path.write_text(text.replace(m.group(0), f'version = "{new}"', 1))
+print(new)
+PY
+)
+echo "==> release version: v${NEW_VERSION}"
+
 echo "==> building ui/ (public-url /${REPO_SLUG}/)"
 (cd ui && trunk build --release --public-url "/${REPO_SLUG}/")
+
+echo "==> committing version bump"
+git add ui/Cargo.toml ui/Cargo.lock
+git commit -qm "Release UI v${NEW_VERSION}"
+git push -q origin HEAD
 
 echo "==> publishing ui/dist to gh-pages"
 TMP=$(mktemp -d)
