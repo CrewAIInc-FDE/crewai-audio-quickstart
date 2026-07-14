@@ -121,13 +121,17 @@ async fn poll_result(cfg: &Settings, kickoff_id: &str) -> Result<String, String>
 // OpenAI transcription (browser FormData multipart)
 // ---------------------------------------------------------------------------
 
-async fn transcribe(cfg: &Settings, audio: web_sys::Blob) -> Result<String, String> {
+async fn transcribe(
+    cfg: &Settings,
+    audio: web_sys::Blob,
+    filename: &str,
+) -> Result<String, String> {
     if cfg.openai_key.is_empty() {
         return Err("Set the OpenAI key in Settings to use the mic.".into());
     }
     let form = web_sys::FormData::new().map_err(js_err)?;
     form.append_with_str("model", "gpt-4o-transcribe").map_err(js_err)?;
-    form.append_with_blob_and_filename("file", &audio, "clip.webm").map_err(js_err)?;
+    form.append_with_blob_and_filename("file", &audio, filename).map_err(js_err)?;
     let resp = gloo_net::http::Request::post(OPENAI_TRANSCRIPTIONS)
         .header("Authorization", &format!("Bearer {}", cfg.openai_key))
         .body(form)
@@ -262,7 +266,24 @@ fn App() -> impl IntoView {
                     return;
                 }
             };
-            let rec = match web_sys::MediaRecorder::new_with_media_stream(&stream) {
+            // OpenAI rejects uploads whose filename/extension doesn't match the
+            // actual container, and MediaRecorder's default container differs by
+            // browser (Chrome: webm/opus, Safari: mp4/AAC). Negotiate a format
+            // explicitly; the upload is later named after what was really used.
+            let picked = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4",
+                          "audio/ogg;codecs=opus", "audio/wav"]
+                .into_iter()
+                .find(|m| web_sys::MediaRecorder::is_type_supported(m));
+            let made = match picked {
+                Some(m) => {
+                    let opts = web_sys::MediaRecorderOptions::new();
+                    opts.set_mime_type(m);
+                    web_sys::MediaRecorder::new_with_media_stream_and_media_recorder_options(
+                        &stream, &opts)
+                }
+                None => web_sys::MediaRecorder::new_with_media_stream(&stream),
+            };
+            let rec = match made {
                 Ok(r) => r,
                 Err(e) => {
                     set_status.set(format!("recorder error: {e:?}"));
@@ -281,6 +302,7 @@ fn App() -> impl IntoView {
             on_data.forget();
 
             let stream_stop = stream.clone();
+            let rec_mime_src = rec.clone();
             let on_stop = Closure::<dyn FnMut()>::new(move || {
                 // release the mic indicator
                 for track in stream_stop.get_tracks().iter() {
@@ -290,8 +312,16 @@ fn App() -> impl IntoView {
                 for b in chunks.borrow().iter() {
                     parts.push(b);
                 }
+                // Name the upload after the container the recorder REALLY used.
+                let mime = rec_mime_src.mime_type();
+                let (blob_type, filename) = match mime.split(';').next().unwrap_or("") {
+                    "audio/mp4" => ("audio/mp4", "clip.mp4"),
+                    "audio/ogg" => ("audio/ogg", "clip.ogg"),
+                    "audio/wav" | "audio/x-wav" => ("audio/wav", "clip.wav"),
+                    _ => ("audio/webm", "clip.webm"),
+                };
                 let opts = web_sys::BlobPropertyBag::new();
-                opts.set_type("audio/webm");
+                opts.set_type(blob_type);
                 let Ok(blob) = web_sys::Blob::new_with_blob_sequence_and_options(&parts, &opts)
                 else {
                     set_status.set("could not assemble the recording".into());
@@ -300,7 +330,7 @@ fn App() -> impl IntoView {
                 let cfg2 = settings.get_untracked();
                 set_status.set("transcribing…".into());
                 spawn_local(async move {
-                    match transcribe(&cfg2, blob).await {
+                    match transcribe(&cfg2, blob, filename).await {
                         Ok(text) if !text.is_empty() => {
                             set_status.set(String::new());
                             send_text(text);
@@ -331,7 +361,7 @@ fn App() -> impl IntoView {
 
     view! {
         <main>
-            <h1>"Field Assistant — CrewAI audio quickstart"</h1>
+            <h1>"Field Assistant" <span class="tag">"voice-first asset operations"</span></h1>
 
             <div class="card">
                 <details prop:open=move || show_settings.get()>
