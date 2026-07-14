@@ -7,7 +7,10 @@ The whole path, in four steps:
                    (this is the ONLY step that needs an OpenAI API key)
     2. DISCOVER    GET {deployment}/inputs -> the exact input keys the
                    deployment expects (never assume them)
-    3. KICKOFF     POST {deployment}/kickoff with {"inputs": {...}}
+    3. KICKOFF     POST {deployment}/kickoff with {"inputs": {...}} — plus,
+                   when continuing a conversation, top-level
+                   "restoreFromStateId": <previous turn's id> (each turn
+                   gets a FRESH id; never reuse one across kickoffs)
     4. POLL        GET {deployment}/status/{kickoff_id} until it finishes
 
 Usage:
@@ -156,23 +159,31 @@ def discover_inputs(base: str, token: str) -> list[str]:
     return data.get("inputs", data) if isinstance(data, dict) else data
 
 
-SESSION_FILE = ".session"  # persists the conversation id between runs
+SESSION_FILE = ".session"  # stores the PREVIOUS turn's id — the chain head
 
 
-def current_session(new: bool = False) -> str:
-    """One conversation across runs: reuse the stored session id until
-    --new-session rotates it. (The deployed flow keys its memory on `id`.)"""
-    if not new and os.path.exists(SESSION_FILE):
-        sid = open(SESSION_FILE).read().strip()
-        try:
-            uuid.UUID(sid)
-            return sid
-        except ValueError:
-            pass
-    sid = str(uuid.uuid4())
+def chain_head(new: bool = False) -> str | None:
+    """Conversation continuity works by CHAINING, not by reusing one id:
+    every turn sends a fresh UUID as its id (the platform deprecates reusing
+    inputs.id across kickoffs — it corrupts traces/metrics), plus the previous
+    turn's id as top-level `restoreFromStateId`, which hydrates that turn's
+    persisted state. Returns the stored chain head, or None for a fresh
+    conversation (first run, --new-session, or an unparseable file)."""
+    if new or not os.path.exists(SESSION_FILE):
+        return None
+    stored = open(SESSION_FILE).read().strip()
+    try:
+        uuid.UUID(stored)
+        return stored
+    except ValueError:
+        return None
+
+
+def save_chain_head(turn_id: str) -> None:
+    """Advance the chain only after a turn SUCCEEDS — a failed turn may have
+    persisted nothing, and restoring from it silently drops the context."""
     with open(SESSION_FILE, "w") as fh:
-        fh.write(sid)
-    return sid
+        fh.write(turn_id)
 
 
 def build_inputs(required: list[str], transcript: str, session_id: str) -> dict:
@@ -201,9 +212,14 @@ def build_inputs(required: list[str], transcript: str, session_id: str) -> dict:
     return inputs
 
 
-def kickoff(base: str, token: str, inputs: dict) -> str:
-    # The body MUST wrap your values in an "inputs" object.
-    data = http("POST", f"{base}/kickoff", token, body={"inputs": inputs})
+def kickoff(base: str, token: str, inputs: dict,
+            restore_from: str | None = None) -> str:
+    # The body MUST wrap your values in an "inputs" object. Conversation
+    # continuity: `restoreFromStateId` sits at the TOP level, beside "inputs".
+    body: dict = {"inputs": inputs}
+    if restore_from:
+        body["restoreFromStateId"] = restore_from
+    data = http("POST", f"{base}/kickoff", token, body=body)
     return data["kickoff_id"]
 
 
@@ -270,15 +286,19 @@ def main() -> None:
     required = discover_inputs(base, token)
     print(f"   required inputs: {required}")
 
-    session_id = current_session(new=args.new_session)
-    print(f"   session: {session_id} (reuse = conversation continues; --new-session to reset)")
-    inputs = build_inputs(required, transcript, session_id)
-    print(f"3) kicking off with inputs: {json.dumps(inputs)}")
-    kickoff_id = kickoff(base, token, inputs)
+    prev = chain_head(new=args.new_session)
+    turn_id = str(uuid.uuid4())
+    print(f"   turn id: {turn_id}"
+          + (f" (chained to {prev})" if prev else " (new conversation)"))
+    inputs = build_inputs(required, transcript, turn_id)
+    print(f"3) kicking off with inputs: {json.dumps(inputs)}"
+          + (" + restoreFromStateId" if prev else ""))
+    kickoff_id = kickoff(base, token, inputs, restore_from=prev)
     print(f"   kickoff_id: {kickoff_id}")
 
     print("4) polling for the result ...")
     answer = wait_for_answer(base, token, kickoff_id)
+    save_chain_head(turn_id)  # only on success — wait_for_answer exits on failure
     print(f"\nanswer:\n{answer}")
 
 

@@ -12,10 +12,14 @@ layer is a seeded SQLite file — no external services, no credentials).
 ## Architecture
 
 ```
-audio file / mic ──► OpenAI transcription (client-side; the only OpenAI-key use)
-                          │  text
+audio file / mic ──► OpenAI transcription — the CLIENT's key, used only here.
+                          │  text          (The deployed flow's agents make their
+                          │                 own OpenAI calls server-side with the
+                          │                 key configured ON THE DEPLOYMENT.)
                           ▼
-             POST {deployment}/kickoff  {"inputs": {"id": "<uuid>", "message": "..."}}
+             POST {deployment}/kickoff
+               {"inputs": {"id": "<fresh uuid>", "message": "..."},
+                "restoreFromStateId": "<previous turn's id>"}   ← from turn 2 on
                           │
                           ▼
         AssistantFlow  (one kickoff = one conversational turn)
@@ -34,9 +38,13 @@ audio file / mic ──► OpenAI transcription (client-side; the only OpenAI-ke
            persistent volume by default)
 ```
 
-**Session contract:** `{"id": "<uuid>", "message": "<user text>"}` → reply string.
-Reuse the same `id` to continue the conversation (the form wizard depends on this);
-new UUID = new conversation. `id` must be a full, valid UUID.
+**Session contract:** each turn sends `{"id": "<FRESH uuid>", "message": "<text>"}`
+plus — from turn 2 on — top-level `"restoreFromStateId": "<previous turn's id>"`;
+the reply is a string. Continuity is **chained, not keyed**: never reuse an id
+across kickoffs (the platform deprecates it — it corrupts traces, the executions
+list, and metrics), and only advance the chain after a turn succeeds. Omit
+`restoreFromStateId` for a new conversation. Ids must be full, valid UUIDs
+(an AMP-side rule — locally any string works, so you'll only hit the 422 there).
 
 ## Deploy (CrewAI AMP)
 
@@ -57,7 +65,8 @@ python3 client/ask.py samples/question.wav
 
 `client/ask.py` is stdlib-only and does the whole loop: transcribe → discover the
 deployment's input contract (`GET /inputs` — never assume key names) → kickoff →
-poll → print. It keeps a `.session` file so consecutive questions continue ONE
+poll → print. It keeps a `.session` file holding the previous turn's id and chains
+each run to it via `restoreFromStateId`, so consecutive questions continue ONE
 conversation — which is what makes the form wizard work by voice:
 
 ```bash
@@ -68,7 +77,8 @@ python3 client/ask.py --new-session clips/next.wav # fresh conversation
 ```
 
 Things to try:
-- "What assets do you have?"
+- "List the assets I can ask about." (phrase it readings-flavored — a bare
+  "what do you have?" routes to the deliberate unknown-intent fallback)
 - "What was the latest output on pump A1?"
 - "Average energy use on compressor B1 this week?"
 - "I'd like to file an incident report." → then answer its questions → "confirm"
@@ -79,12 +89,17 @@ produces wav/mp3/m4a.
 ## Browser client (`ui/`)
 
 A fully client-side web UI (Rust/Leptos → WASM): paste your deployment URL,
-bearer token, and OpenAI key (stored in your browser's localStorage, sent nowhere
-else), then talk — mic capture → transcription → kickoff → spoken reply via the
-browser's speech synthesis. See [`ui/README.md`](ui/README.md) for build/run.
+bearer token, and OpenAI key, then talk — mic capture → transcription → kickoff →
+spoken reply via the browser's speech synthesis. The three values are stored only
+in your browser's localStorage; the browser sends the deployment values only to
+your deployment endpoint and the OpenAI key only to OpenAI's transcription API.
+(The deployed flow's agents use the key configured on the deployment — the
+browser key does transcription and nothing else.) See
+[`ui/README.md`](ui/README.md) for build/run.
 
-> Browser calls go directly to the deployment API; if your browser blocks them
-> (CORS), use `client/ask.py` — same loop, no browser restrictions.
+> Browser → deployment CORS is verified working (the API sends CORS headers).
+> If a corporate proxy still blocks it, `client/ask.py` is the same loop with
+> no browser rules.
 
 ## Local development
 

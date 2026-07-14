@@ -18,17 +18,20 @@ Fill in Settings:
 |---|---|
 | Deployment URL | your deployment's page in CrewAI AMP |
 | Deployment bearer token | same page |
-| OpenAI API key | only needed for the 🎤 mic button (transcription) |
+| OpenAI API key | only needed for the 🎤 mic button — it is used for transcription and nothing else (the deployed flow's agents run on the key configured on the deployment, not this one) |
 
 Then type — or click **🎤 Talk**, speak, click **Stop**. The reply can be
 spoken aloud (checkbox in Settings) via the browser's speech synthesis.
 
-"New conversation" rotates the session UUID; keeping it means the assistant
-remembers the conversation (that's what makes the form wizard work).
+Conversation continuity is a `restoreFromStateId` **chain**: every turn sends
+a fresh UUID and restores the previous turn's state (the footer shows the
+current chain head, advanced only when a turn succeeds — never reuse one id
+across kickoffs). **"New conversation"** clears the chain; keeping it is what
+makes the form wizard work.
 
-## Known constraint
+## Cross-origin note
 
-The browser calls the deployment API cross-origin. If your browser console
-shows CORS errors on `/kickoff`, the platform isn't sending CORS headers for
-browser callers — use `client/ask.py` (identical loop, no browser rules) and
-tell us; we're tracking whether the deployment API advertises CORS.
+The browser calls the deployment API cross-origin; AMP sends the CORS headers
+for this (verified against a live deployment from the published Pages origin,
+2026-07-13). If a corporate proxy or extension still blocks it, use
+`client/ask.py` — identical loop, no browser rules.

@@ -21,12 +21,15 @@ Architecture (the shape we see working in production engagements):
     kickoff executions (on CrewAI AMP SaaS, state lands on the persistent
     volume by default).
 
-Session contract:
-    inputs: {"id": "<uuid>", "message": "<user text>"}
+Session contract (one kickoff = one conversational turn):
+    inputs: {"id": "<FRESH uuid>", "message": "<user text>"}
+    plus, from turn 2 on, TOP-LEVEL "restoreFromStateId": <previous turn's id>
     result: the assistant's reply (string)
 
-One kickoff = one conversational turn. Reuse the same `id` to continue a
-conversation; use a fresh UUID to start a new one.
+Continuity is CHAINED, not keyed: every turn sends a fresh id (the platform
+deprecates reusing inputs.id across kickoffs — it corrupts traces, the
+executions list, and metrics) and hydrates the previous turn's persisted
+state via restoreFromStateId. Omit restoreFromStateId to start fresh.
 """
 
 from __future__ import annotations
