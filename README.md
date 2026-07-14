@@ -126,3 +126,35 @@ the snapshot to the `gh-pages` branch, which Pages serves (Settings → Pages �
 Deploy from a branch → `gh-pages` / root). Everything runs client-side: users
 paste their own deployment URL, bearer token, and (for the mic) OpenAI key,
 stored only in the browser's localStorage.
+
+## Testing
+
+Three tiers, all under `tests/` (deps install with `uv sync`; Playwright
+needs a one-time `uv run playwright install firefox`):
+
+```
+uv run pytest -m "not credentialed"   # unit: no network, no creds, ~2s
+uv run pytest -m credentialed         # integration + e2e (see below)
+uv run pytest                         # everything
+```
+
+Credentialed tests (real kickoffs against your deployment + Playwright
+driving the published UI in Firefox) require a **git-ignored `.env` at the
+repo root**:
+
+```
+CREWAI_DEPLOYMENT_URL=https://<your-deployment>.crewai.com
+CREWAI_DEPLOYMENT_TOKEN=<bearer token from the deployment's AMP page>
+OPENAI_API_KEY=sk-...        # only for mic-related tests
+```
+
+Without it the suite stops with these same instructions. Firefox is the
+default e2e browser deliberately — it has the strictest MediaRecorder
+behavior (default container `audio/ogg`), so a green mic test there covers
+the rest. The mic pipeline runs against Firefox's fake microphone, so no
+audio hardware (or OpenAI spend) is needed.
+
+Each release bumps the UI version (footer shows `build vX.Y.Z`) and all
+assets are content-hashed, so a stale cached page is both visible and
+mechanically distinct; GitHub Pages' ~10-minute index.html TTL is the only
+residual staleness.
